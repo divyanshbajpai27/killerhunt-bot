@@ -9,7 +9,6 @@ from collections import Counter
 
 intents = discord.Intents.default()
 intents.members = True
-intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -24,24 +23,27 @@ ITEM_EMOJIS = {
     "Team Reveal": "<:Team_Reveal:1484098361177936003>"
 }
 
-# ====================== DAILY ROLES ======================
+# ====================== ROLES ======================
 DAY_ROLES = {
-    0: ["Interrogator"], 1: ["Interrogator"], 2: ["Interrogator"],
-    3: ["Voter"], 4: ["Voter", "ClueHunter"], 5: ["Voter", "ClueHunter", "Shopper"], 6: []
+    0: ["Interrogator"], 1: ["Interrogator"], 2: ["Interrogator"],  # Mon-Wed
+    3: ["Voter"],                                                   # Thu
+    4: ["Voter", "ClueHunter"],                                     # Fri
+    5: ["Voter", "ClueHunter", "Shopper"],                          # Sat
+    6: []                                                           # Sun
 }
 ALL_DAILY_ROLES = ["Interrogator", "Voter", "ClueHunter", "Shopper"]
 
 # ====================== MARKETPLACE ======================
 SHOP = {
-    "Sniper": {"cost": 150},
-    "Revival Kit": {"cost": 200},
-    "True Glass": {"cost": 120},
-    "Team Reveal": {"cost": 80}
+    "Sniper": 150,
+    "Revival Kit": 200,
+    "True Glass": 120,
+    "Team Reveal": 80
 }
 
 def load_data():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
+        with open(DATA_FILE) as f:
             raw = json.load(f)
             for uid in raw:
                 if isinstance(raw[uid].get("inventory"), list):
@@ -57,36 +59,23 @@ def save_data(data):
 
 data = load_data()
 
-ghost_role_name = "Ghost"
-
+# ====================== MAKE GHOST ======================
 async def make_ghost(member):
     guild = member.guild
+    ghost_role = discord.utils.get(guild.roles, name="Ghost")
     participant_role = discord.utils.get(guild.roles, name="Participant")
-    ghost_role = discord.utils.get(guild.roles, name=ghost_role_name)
+
+    # Remove all daily roles
     for rname in ALL_DAILY_ROLES:
         role = discord.utils.get(guild.roles, name=rname)
         if role and role in member.roles:
             await member.remove_roles(role)
+    # Remove Participant
     if participant_role and participant_role in member.roles:
         await member.remove_roles(participant_role)
+    # Give Ghost
     if ghost_role and ghost_role not in member.roles:
         await member.add_roles(ghost_role)
-
-class ConfirmGhostView(discord.ui.View):
-    def __init__(self, action_func):
-        super().__init__(timeout=30)
-        self.action_func = action_func
-
-    @discord.ui.button(label="Confirm (Become Ghost)", style=discord.ButtonStyle.red)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.action_func()
-        await interaction.response.edit_message(content="✅ Action confirmed. You are now a **Ghost**.", view=None)
-        self.stop()
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.gray)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="❌ Cancelled.", view=None)
-        self.stop()
 
 # ====================== ROLE MANAGER ======================
 async def manage_daily_roles():
@@ -100,7 +89,7 @@ async def manage_daily_roles():
     roles_today = DAY_ROLES.get(weekday, [])
 
     participant_role = discord.utils.get(guild.roles, name="Participant")
-    ghost_role = discord.utils.get(guild.roles, name=ghost_role_name)
+    ghost_role = discord.utils.get(guild.roles, name="Ghost")
     if not participant_role: return
 
     to_add = []
@@ -108,7 +97,7 @@ async def manage_daily_roles():
 
     for member in guild.members:
         if participant_role not in member.roles: continue
-        if ghost_role and ghost_role in member.roles: continue
+        if ghost_role and ghost_role in member.roles: continue  # Ghost excluded
 
         if in_window:
             for rname in roles_today:
@@ -128,6 +117,23 @@ async def manage_daily_roles():
         await member.remove_roles(role, reason="Daily role window ended")
         await asyncio.sleep(0.35 if i % 8 != 0 else 1.2)
 
+# ====================== CONFIRMATION VIEW ======================
+class ConfirmGhostView(discord.ui.View):
+    def __init__(self, action_func):
+        super().__init__(timeout=30)
+        self.action_func = action_func
+
+    @discord.ui.button(label="Confirm (Become Ghost)", style=discord.ButtonStyle.red)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.action_func()
+        await interaction.response.edit_message(content="✅ Confirmed. You are now a **Ghost**.", view=None)
+        self.stop()
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.gray)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="❌ Cancelled.", view=None)
+        self.stop()
+
 # ====================== BOT START ======================
 @client.event
 async def on_ready():
@@ -138,10 +144,10 @@ async def on_ready():
         await manage_daily_roles()
         await asyncio.sleep(60)
 
-# ====================== EPHEMERAL VOTE ======================
+# ====================== SLASH COMMANDS ======================
 @tree.command(name="vote", description="Vote on a team")
-@app_commands.describe(team="Team role to vote for", points="Points to spend")
-async def vote(interaction: discord.Interaction, team: discord.Role, points: int):
+@app_commands.describe(team="Team role", points="Points to spend")
+async def vote_cmd(interaction: discord.Interaction, team: discord.Role, points: int):
     if not discord.utils.get(interaction.user.roles, name="Voter"):
         await interaction.response.send_message("❌ You need the **Voter** role.", ephemeral=True)
         return
@@ -168,23 +174,17 @@ async def vote(interaction: discord.Interaction, team: discord.Role, points: int
             data[uid]["votes"][str(team.id)] = data[uid]["votes"].get(str(team.id), 0) + points
             save_data(data)
             await make_ghost(interaction.user)
-
         view = ConfirmGhostView(do_vote)
-        await interaction.response.send_message(
-            f"⚠️ This vote will use **all** your points and turn you into a Ghost.\nConfirm?", 
-            view=view, 
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"⚠️ This vote will use **all** your points and turn you into a Ghost.\nConfirm?", view=view, ephemeral=True)
     else:
         data[uid]["points"] -= points
         data[uid]["votes"][str(team.id)] = data[uid]["votes"].get(str(team.id), 0) + points
         save_data(data)
         await interaction.response.send_message(f"✅ Voted **{points}** points on {team.mention}!", ephemeral=False)
 
-# ====================== EPHEMERAL BUY ======================
 @tree.command(name="buy", description="Buy an item")
 @app_commands.describe(item="Item name")
-async def buy(interaction: discord.Interaction, item: str):
+async def buy_cmd(interaction: discord.Interaction, item: str):
     item = item.title()
     if item not in SHOP:
         await interaction.response.send_message("❌ Item not found!", ephemeral=True)
@@ -196,7 +196,7 @@ async def buy(interaction: discord.Interaction, item: str):
     uid = str(interaction.user.id)
     if uid not in data:
         data[uid] = {"points": 0, "inventory": {}, "votes": {}}
-    cost = SHOP[item]["cost"]
+    cost = SHOP[item]
     if data[uid]["points"] < cost:
         await interaction.response.send_message(f"❌ Not enough points! Need {cost}.", ephemeral=True)
         return
@@ -207,13 +207,8 @@ async def buy(interaction: discord.Interaction, item: str):
             data[uid]["inventory"][item] = data[uid]["inventory"].get(item, 0) + 1
             save_data(data)
             await make_ghost(interaction.user)
-
         view = ConfirmGhostView(do_buy)
-        await interaction.response.send_message(
-            f"⚠️ This purchase will use **all** your points and turn you into a Ghost.\nConfirm?", 
-            view=view, 
-            ephemeral=True
-        )
+        await interaction.response.send_message(f"⚠️ This purchase will use **all** your points and turn you into a Ghost.\nConfirm?", view=view, ephemeral=True)
     else:
         data[uid]["points"] -= cost
         data[uid]["inventory"][item] = data[uid]["inventory"].get(item, 0) + 1
@@ -221,7 +216,6 @@ async def buy(interaction: discord.Interaction, item: str):
         emoji = ITEM_EMOJIS.get(item, "")
         await interaction.response.send_message(f"✅ {emoji} Bought **{item}** for {cost} points!", ephemeral=False)
 
-# ====================== PREFIX COMMANDS (kept for convenience) ======================
 @client.event
 async def on_message(message):
     if message.author.bot: return
