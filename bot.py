@@ -1,16 +1,19 @@
 import discord
-from discord import app_commands
+import os
+import json
 import asyncio
 from datetime import datetime
 import pytz
-import json
-import os
 from collections import Counter
+from dotenv import load_dotenv
+
+load_dotenv()
 
 intents = discord.Intents.default()
 intents.members = True
-client = discord.Client(intents=intents)
-tree = app_commands.CommandTree(client)
+intents.message_content = True
+
+bot = discord.Bot(intents=intents)
 
 GUILD_ID = 1482792426992304359
 DATA_FILE = "killerhunt_data.json"
@@ -27,12 +30,8 @@ DAY_ROLES = {
     3: ["Voter"], 4: ["Voter", "ClueHunter"], 5: ["Voter", "ClueHunter", "Shopper"], 6: []
 }
 ALL_DAILY_ROLES = ["Interrogator", "Voter", "ClueHunter", "Shopper"]
-
 SHOP = {
-    "Sniper": 150,
-    "Revival Kit": 200,
-    "True Glass": 120,
-    "Team Reveal": 80
+    "Sniper": 150, "Revival Kit": 200, "True Glass": 120, "Team Reveal": 80
 }
 
 def load_data():
@@ -64,7 +63,6 @@ async def make_ghost(member):
     if g := discord.utils.get(guild.roles, name="Ghost"):
         if g not in member.roles: await member.add_roles(g)
 
-# ====================== CONFIRMATION VIEW ======================
 class ConfirmGhostView(discord.ui.View):
     def __init__(self, action_func):
         super().__init__(timeout=30)
@@ -81,9 +79,8 @@ class ConfirmGhostView(discord.ui.View):
         await interaction.response.edit_message(content="❌ Cancelled.", view=None)
         self.stop()
 
-# ====================== ROLE MANAGER ======================
 async def manage_daily_roles():
-    guild = client.get_guild(GUILD_ID)
+    guild = bot.get_guild(GUILD_ID)
     if not guild: return
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
@@ -91,18 +88,15 @@ async def manage_daily_roles():
     hour = now.hour
     in_window = 18 <= hour < 21
     roles_today = DAY_ROLES.get(weekday, [])
-
     participant_role = discord.utils.get(guild.roles, name="Participant")
     ghost_role = discord.utils.get(guild.roles, name="Ghost")
     if not participant_role: return
 
     to_add = []
     to_remove = []
-
     for member in guild.members:
         if participant_role not in member.roles: continue
         if ghost_role and ghost_role in member.roles: continue
-
         if in_window:
             for rname in roles_today:
                 role = discord.utils.get(guild.roles, name=rname)
@@ -121,108 +115,103 @@ async def manage_daily_roles():
         await member.remove_roles(role, reason="Daily role window ended")
         await asyncio.sleep(0.35 if i % 8 != 0 else 1.2)
 
-# ====================== BOT START ======================
-@client.event
+@bot.event
 async def on_ready():
-    print(f"✅ Killer Hunt Bot Online as {client.user}")
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
-    print("✅ Slash commands synced!")
+    print(f"✅ Killer Hunt Bot Online as {bot.user}")
+    print("📦 Using discord from:", discord.__file__)
+    print("📦 Version:", getattr(discord, "__version__", "Unknown"))
+    
+    # This is the modern, reliable way in py-cord
+    await bot.sync_commands(guild_ids=[GUILD_ID])
+    print("✅ Slash commands synced to your server!")
+    
     while True:
         await manage_daily_roles()
         await asyncio.sleep(60)
 
-# ====================== MANUAL SYNC (REAPER ONLY) ======================
-@tree.command(name="sync", description="Reaper only - Force sync all slash commands")
-async def sync_cmd(interaction: discord.Interaction):
-    if not discord.utils.get(interaction.user.roles, name="Reaper"):
-        await interaction.response.send_message("❌ Reaper only!", ephemeral=True)
+# ====================== COMMANDS ======================
+@bot.command(description="Reaper only - Force sync all slash commands")
+async def sync(ctx: discord.ApplicationContext):
+    if not discord.utils.get(ctx.author.roles, name="Reaper"):
+        await ctx.respond("❌ Reaper only!", ephemeral=True)
         return
-    await tree.sync(guild=discord.Object(id=GUILD_ID))
-    await interaction.response.send_message("✅ All slash commands force-synced! Try typing `/vote` or `/buy` now.", ephemeral=False)
+    await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
+    await ctx.respond("✅ All slash commands force-synced! Try /vote now.", ephemeral=False)
 
-# ====================== VOTE (Ephemeral) ======================
-@tree.command(name="vote", description="Vote on a team")
-@app_commands.describe(team="Team role", points="Points")
-async def vote_cmd(interaction: discord.Interaction, team: discord.Role, points: int):
-    if not discord.utils.get(interaction.user.roles, name="Voter"):
-        await interaction.response.send_message("❌ You need the **Voter** role.", ephemeral=True)
+@bot.command(description="Vote on a team")
+@discord.option("team", discord.Role, description="Team role")
+@discord.option("points", int, description="Points (min 5)")
+async def vote(ctx: discord.ApplicationContext, team: discord.Role, points: int):
+    if not discord.utils.get(ctx.author.roles, name="Voter"):
+        await ctx.respond("❌ You need the **Voter** role.", ephemeral=True)
         return
     if points < 5:
-        await interaction.response.send_message("❌ Minimum 5 points!", ephemeral=True)
+        await ctx.respond("❌ Minimum 5 points!", ephemeral=True)
         return
-    if team in interaction.user.roles:
-        await interaction.response.send_message("❌ You cannot vote for your own team!", ephemeral=True)
+    if team in ctx.author.roles:
+        await ctx.respond("❌ You cannot vote for your own team!", ephemeral=True)
         return
-
-    uid = str(interaction.user.id)
+    uid = str(ctx.author.id)
     if uid not in data:
         data[uid] = {"points": 0, "inventory": {}, "votes": {}}
-    if "votes" not in data[uid]:
-        data[uid]["votes"] = {}
-
     if data[uid]["points"] < points:
-        await interaction.response.send_message("❌ Not enough points!", ephemeral=True)
+        await ctx.respond("❌ Not enough points!", ephemeral=True)
         return
-
     if data[uid]["points"] - points == 0:
         async def do_vote():
             data[uid]["points"] = 0
             data[uid]["votes"][str(team.id)] = data[uid]["votes"].get(str(team.id), 0) + points
             save_data(data)
-            await make_ghost(interaction.user)
+            await make_ghost(ctx.author)
         view = ConfirmGhostView(do_vote)
-        await interaction.response.send_message(f"⚠️ This vote will use **all** your points and turn you into a Ghost.\nConfirm?", view=view, ephemeral=True)
+        await ctx.respond(f"⚠️ This vote will use **all** your points and turn you into a Ghost.\nConfirm?", view=view, ephemeral=True)
     else:
         data[uid]["points"] -= points
         data[uid]["votes"][str(team.id)] = data[uid]["votes"].get(str(team.id), 0) + points
         save_data(data)
-        await interaction.response.send_message(f"✅ Voted **{points}** points on {team.mention}!", ephemeral=False)
+        await ctx.respond(f"✅ Voted **{points}** points on {team.mention}!", ephemeral=False)
 
-# ====================== BUY (Ephemeral) ======================
-@tree.command(name="buy", description="Buy an item")
-@app_commands.describe(item="Item name")
-async def buy_cmd(interaction: discord.Interaction, item: str):
+@bot.command(description="Buy an item")
+@discord.option("item", str, description="Item name")
+async def buy(ctx: discord.ApplicationContext, item: str):
     item = item.title()
     if item not in SHOP:
-        await interaction.response.send_message("❌ Item not found!", ephemeral=True)
+        await ctx.respond("❌ Item not found!", ephemeral=True)
         return
-    if not discord.utils.get(interaction.user.roles, name="Shopper"):
-        await interaction.response.send_message("❌ Marketplace only open Saturday 6–9 PM!", ephemeral=True)
+    if not discord.utils.get(ctx.author.roles, name="Shopper"):
+        await ctx.respond("❌ Marketplace only open Saturday 6–9 PM!", ephemeral=True)
         return
-
-    uid = str(interaction.user.id)
+    uid = str(ctx.author.id)
     if uid not in data:
         data[uid] = {"points": 0, "inventory": {}, "votes": {}}
     cost = SHOP[item]
     if data[uid]["points"] < cost:
-        await interaction.response.send_message(f"❌ Not enough points! Need {cost}.", ephemeral=True)
+        await ctx.respond(f"❌ Not enough points! Need {cost}.", ephemeral=True)
         return
-
     if data[uid]["points"] - cost == 0:
         async def do_buy():
             data[uid]["points"] = 0
             data[uid]["inventory"][item] = data[uid]["inventory"].get(item, 0) + 1
             save_data(data)
-            await make_ghost(interaction.user)
+            await make_ghost(ctx.author)
         view = ConfirmGhostView(do_buy)
-        await interaction.response.send_message(f"⚠️ This purchase will use **all** your points and turn you into a Ghost.\nConfirm?", view=view, ephemeral=True)
+        await ctx.respond(f"⚠️ This purchase will use **all** your points and turn you into a Ghost.\nConfirm?", view=view, ephemeral=True)
     else:
         data[uid]["points"] -= cost
         data[uid]["inventory"][item] = data[uid]["inventory"].get(item, 0) + 1
         save_data(data)
         emoji = ITEM_EMOJIS.get(item, "")
-        await interaction.response.send_message(f"✅ {emoji} Bought **{item}** for {cost} points!", ephemeral=False)
+        await ctx.respond(f"✅ {emoji} Bought **{item}** for {cost} points!", ephemeral=False)
 
-@client.event
+# ====================== MESSAGE COMMANDS ======================
+@bot.event
 async def on_message(message):
     if message.author.bot: return
     content = message.content.lower()
-
     if content == "!points":
         uid = str(message.author.id)
         pts = data.get(uid, {}).get("points", 0)
         await message.channel.send(f"**{message.author.name}**, you have **{pts}** points.")
-
     if content == "!inventory":
         uid = str(message.author.id)
         inv = data.get(uid, {}).get("inventory", {})
@@ -231,7 +220,6 @@ async def on_message(message):
         else:
             lines = [f"{ITEM_EMOJIS.get(item, '•')} {item} **x{count}**" for item, count in inv.items()]
             await message.channel.send(f"{message.author.mention} items:\n" + "\n".join(lines))
-
     if content == "!myvotes":
         uid = str(message.author.id)
         votes = data.get(uid, {}).get("votes", {})
@@ -245,7 +233,6 @@ async def on_message(message):
                 name = role.mention if role else f"Unknown"
                 lines.append(f"{name} — **{pts}** points")
             await message.channel.send(f"{message.author.mention}'s votes:\n" + "\n".join(lines))
-
     if content == "!votetally" and discord.utils.get(message.author.roles, name="Reaper"):
         tally = {}
         for uid, player_data in data.items():
@@ -262,7 +249,6 @@ async def on_message(message):
                 name = role.mention if role else f"Unknown"
                 lines.append(f"{name} — **{pts}** total points")
             await message.channel.send("**Current Vote Tally:**\n" + "\n".join(lines))
-
     if content.startswith("!givepoints ") and discord.utils.get(message.author.roles, name="Reaper"):
         try:
             parts = content.split()
@@ -275,7 +261,6 @@ async def on_message(message):
             await message.channel.send(f"✅ Gave {amount} points to {user.mention}")
         except:
             await message.channel.send("Usage: `!givepoints @player 500`")
-
     if content.startswith("!codexstrike ") and discord.utils.get(message.author.roles, name="Reaper"):
         try:
             user = message.mentions[0]
@@ -285,4 +270,4 @@ async def on_message(message):
         except:
             await message.channel.send("Usage: `!codexstrike @player [reason]`")
 
-client.run(os.getenv("TOKEN"))
+bot.run(os.getenv("TOKEN"))
