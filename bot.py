@@ -16,7 +16,7 @@ intents.message_content = True
 bot = discord.Bot(intents=intents)
 
 GUILD_ID = 1482792426992304359
-DATA_FILE = "killerhunt_data.json"
+DATA_FILE = os.getenv("DATA_FILE", "killerhunt_data.json")
 
 ITEM_EMOJIS = {
     "Sniper": "<:Sniper:1484098474571206777>",
